@@ -351,31 +351,89 @@ app.get('/football/standings', async (req, res) => {
 
 app.get('/football/highlights', async (req, res) => {
   try {
-    const { date, limit = 20 } = req.query;
-    const params = { limit };
-    if (date) params.date = date;
+    // Extract query parameters with defaults
+    const { 
+      date, 
+      limit = 20, 
+      countryCode,
+      leagueId,
+      timezone = 'Etc/UTC',
+      offset = 0
+    } = req.query;
 
-    const response = await axios.get(`${API_BASE_URL}/football/highlights`, {
-      params,
-      headers: {
-        'x-rapidapi-key': API_KEY,
-        'x-rapidapi-host': new URL(API_BASE_URL).hostname
+    // Always use last 7 days as default date range
+    const dates = getDateRange(); // This will always return 7 dates
+    
+    // Build params object
+    const params = {
+      limit: Math.min(limit, 40), // Enforce maximum limit of 40
+      offset,
+      timezone
+    };
+
+    // Add optional parameters (excluding matchId)
+    if (countryCode) params.countryCode = countryCode;
+    if (leagueId) params.leagueId = leagueId;
+
+    // Fetch highlights for each date in the 7-day range
+    let allHighlights = [];
+    for (const currentDate of dates) {
+      try {
+        const response = await axios.get(`${API_BASE_URL}/football/highlights`, {
+          params: {
+            ...params,
+            date: currentDate
+          },
+          headers: {
+            'x-rapidapi-key': API_KEY,
+            'x-rapidapi-host': new URL(API_BASE_URL).hostname
+          }
+        });
+
+        if (response.data) {
+          const highlights = Array.isArray(response.data) ? response.data : [response.data];
+          allHighlights = [...allHighlights, ...highlights];
+        }
+      } catch (error) {
+        console.error(`Error fetching highlights for date ${currentDate}:`, error.message);
       }
-    });
+    }
 
+    // Prepare response with date range info
     res.json({
       meta: {
         lastUpdated: new Date().toISOString(),
-        totalResults: Array.isArray(response.data) ? response.data.length : 1
+        parameters: params,
+        totalResults: allHighlights.length,
+        dateRange: {
+          startDate: dates[0],
+          endDate: dates[dates.length - 1],
+          days: dates.length
+        }
       },
-      data: response.data
+      data: allHighlights,
+      pagination: {
+        limit: params.limit,
+        offset: params.offset,
+        nextOffset: params.offset + params.limit
+      }
     });
+
   } catch (error) {
-    console.error('Highlights API Error:', error.message);
-    res.status(500).json({ 
-      error: 'Failed to fetch highlights',
-      details: error.response?.data || error.message
-    });
+    console.error('Football Highlights API Error:', error.message);
+    
+    if (error.response) {
+      res.status(error.response.status).json({
+        error: 'Failed to fetch football highlights',
+        details: error.response.data,
+        status: error.response.status
+      });
+    } else {
+      res.status(500).json({ 
+        error: 'Internal server error',
+        details: error.message
+      });
+    }
   }
 });
 
@@ -444,6 +502,63 @@ app.get('/football/h2h', async (req, res) => {
   }
 });
 
+
+// Cricket highlight by ID endpoint
+app.get('/cricket/highlights/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Validate ID
+    if (!id || isNaN(Number(id))) {
+      return res.status(400).json({ 
+        error: 'Invalid highlight ID',
+        details: 'ID must be a numeric value'
+      });
+    }
+
+    // Get headers with fallback to environment variables
+    const rapidApiHost = req.headers['x-rapidapi-host'] || 'sport-highlights-api.p.rapidapi.com';
+    const rapidApiKey = req.headers['x-rapidapi-key'] || API_KEY;
+    
+    // Make request to external API
+    const response = await axios.get(`${API_BASE_URL}/cricket/highlights/${id}`, {
+      headers: {
+        'x-rapidapi-key': rapidApiKey,
+        'x-rapidapi-host': rapidApiHost
+      }
+    });
+
+    // Return successful response
+    res.json({
+      meta: {
+        id: Number(id),
+        retrievedAt: new Date().toISOString(),
+        sport: 'cricket'
+      },
+      data: response.data
+    });
+
+  } catch (error) {
+    console.error('Cricket Highlight by ID Error:', error.message);
+    
+    if (error.response) {
+      res.status(error.response.status).json({
+        error: 'Failed to retrieve cricket highlight',
+        details: error.response.data
+      });
+    } else if (error.request) {
+      res.status(503).json({
+        error: 'Service unavailable',
+        details: 'Could not connect to highlight service'
+      });
+    } else {
+      res.status(500).json({
+        error: 'Internal server error',
+        details: error.message
+      });
+    }
+  }
+});
 // Root endpoint
 app.get('/', (req, res) => {
   const sports = Object.keys(activeSubscriptions);

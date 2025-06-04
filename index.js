@@ -23,7 +23,7 @@ app.use(express.json());
 
 // API Configuration
 const API_BASE_URL = 'https://sport-highlights-api.p.rapidapi.com';
-const API_KEY = process.env.API_KEY || 'e8555e69a8msh1de65d7c1cbf7d1p1bd3b7jsn2efec15ed0d5';
+const API_KEY = process.env.API_KEY || '23ed8f1637msh9d5ecb868166523p1db1adjsnab581199d3d5';
 const UPDATE_INTERVAL = 60000; // 1 minute
 const CACHE_TTL = 60000; // 1 minute cache
 const MAX_LIMIT = 100; // Maximum matches per request

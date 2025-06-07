@@ -2,7 +2,6 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const moment = require('moment');
 const http = require('http');
 const socketIo = require('socket.io');
 
@@ -11,10 +10,8 @@ const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
     origin: "*",
-    methods: ["GET", "POST"],
-    credentials: true
-  },
-  transports: ['websocket', 'polling']
+    methods: ["GET", "POST"]
+  }
 });
 
 // Middleware
@@ -23,274 +20,176 @@ app.use(express.json());
 
 // API Configuration
 const API_BASE_URL = 'https://sport-highlights-api.p.rapidapi.com';
-const API_KEY = process.env.API_KEY || '9039004ce3msh8ae4f9c049e7c1fp13969fjsn90e3ab56524a';
-const UPDATE_INTERVAL = 1800000; // 1 minute
-const CACHE_TTL = 60000; // 1 minute cache
-const MAX_LIMIT = 100; // Maximum matches per request
-const DAYS_RANGE = 7; // 7 days data
-const INACTIVITY_TIMEOUT = 300000; // 5 minutes inactivity
+// const API_KEY = '9039004ce3msh8ae4f9c049e7c1fp13969fjsn90e3ab56524a';
+// const API_KEY = 'e8555e69a8msh1de65d7c1cbf7d1p1bd3b7jsn2efec15ed0d5';
+const API_KEY = '23ed8f1637msh9d5ecb868166523p1db1adjsnab581199d3d5';
+const UPDATE_INTERVAL = 3600000; // 1 hour
+const CACHE_TTL = 1800000; // 30 minutes cache
 
 // Supported sports
-const SPORTS = [
-  'football', 'basketball', 'hockey', 'baseball',
-  'cricket', 'rugby', 'handball', 'volleyball'
-];
+const SPORTS = {
+  football: 'football',
+  cricket: 'cricket',
+  basketball: 'basketball',
+  hockey: 'hockey',
+  baseball: 'baseball',
+  rugby: 'rugby',
+  handball: 'handball',
+  volleyball: 'volleyball'
+};
 
 // Data Structures
-const sportDataCache = new Map();
-const activeSubscriptions = SPORTS.reduce((acc, sport) => {
-  acc[sport] = { users: new Set(), interval: null, lastActive: null };
-  return acc;
-}, {});
+const matchesCache = new Map();
+const matchDetailsCache = new Map();
+const activeSubscriptions = {};
+const activeMatchSubscriptions = {};
 
-// Helper functions
-function getDateRange(days = DAYS_RANGE) {
-  const startDate = moment().subtract(Math.floor(days/2), 'days');
-  return Array.from({ length: days }, (_, i) => 
-    startDate.clone().add(i, 'days').format('YYYY-MM-DD')
-  );
-}
-
-function buildCacheKey(sport, params = {}) {
-  const sortedParams = Object.keys(params).sort().reduce((acc, key) => {
-    acc[key] = params[key];
-    return acc;
-  }, {});
-  return `${sport}:${JSON.stringify(sortedParams)}`;
-}
-
-// Start/stop update intervals
-function startSportUpdates(sport) {
-  if (activeSubscriptions[sport].interval) return;
-
-  const updateData = async () => {
-    const data = await fetchSportData(sport);
-    if (data) {
-      io.to(sport).emit(`${sport}-update`, {
-        meta: { lastUpdated: new Date().toISOString() },
-        data
-      });
-    }
-    activeSubscriptions[sport].lastActive = Date.now();
+// Initialize subscriptions
+Object.keys(SPORTS).forEach(sport => {
+  activeSubscriptions[sport] = {
+    users: new Set(),
+    interval: null,
+    lastUpdated: null
   };
+  activeMatchSubscriptions[sport] = {};
+});
 
-  // Initial fetch
-  updateData();
-
-  // Set up interval
-  activeSubscriptions[sport].interval = setInterval(updateData, UPDATE_INTERVAL);
-  console.log(`Started ${sport} updates with ${UPDATE_INTERVAL/1000}s interval`);
-}
-
-function stopSportUpdates(sport) {
-  if (activeSubscriptions[sport].interval) {
-    clearInterval(activeSubscriptions[sport].interval);
-    activeSubscriptions[sport].interval = null;
-    console.log(`Stopped ${sport} updates`);
-  }
-}
-
-// Check for inactive sports every minute
-setInterval(() => {
-  const now = Date.now();
-  SPORTS.forEach(sport => {
-    if (activeSubscriptions[sport].users.size === 0 && 
-        activeSubscriptions[sport].lastActive && 
-        (now - activeSubscriptions[sport].lastActive) > INACTIVITY_TIMEOUT) {
-      stopSportUpdates(sport);
-    }
-  });
-}, 60000);
-
-// Fetch sport data with optimization
-async function fetchSportData(sport, params = {}) {
-  const cacheKey = buildCacheKey(sport, params);
-  const cachedData = sportDataCache.get(cacheKey);
-  
-  if (cachedData && Date.now() - cachedData.timestamp < CACHE_TTL) {
-    return cachedData.data;
-  }
-
+// Fetch match details
+async function fetchMatchDetails(sport, matchId) {
   try {
-    const response = await axios.get(`${API_BASE_URL}/${sport}/matches`, {
-      params: { ...params, limit: MAX_LIMIT },
+    const response = await axios.get(`${API_BASE_URL}/${SPORTS[sport]}/matches/${matchId}`, {
       headers: {
         'x-rapidapi-key': API_KEY,
-        'x-rapidapi-host': new URL(API_BASE_URL).hostname
+        'x-rapidapi-host': 'sport-highlights-api.p.rapidapi.com'
       }
     });
+    return response.data;
+  } catch (error) {
+    console.error(`Error fetching ${sport} match details:`, error.message);
+    return null;
+  }
+}
 
-    let matches = Array.isArray(response.data) ? response.data : [response.data];
+// Fetch matches with details
+async function fetchMatches(sport, params = {}) {
+  try {
+    const queryParams = { limit: 100 };
     
-    if (matches.length >= MAX_LIMIT) {
-      console.log(`Hit max limit for ${sport}, using date-based fetching`);
-      return await fetchDataByDate(sport, params);
+    if (params.date) {
+      queryParams.date = params.date;
+    } else if (params.leagueId) {
+      queryParams.leagueId = params.leagueId;
+    } else {
+      const endDate = new Date();
+      const startDate = new Date();
+      startDate.setDate(endDate.getDate() - 3);
+      queryParams.dateFrom = startDate.toISOString().split('T')[0];
+      queryParams.dateTo = endDate.toISOString().split('T')[0];
     }
 
-    sportDataCache.set(cacheKey, { data: matches, timestamp: Date.now() });
+    if (params.teamId) queryParams.teamId = params.teamId;
+
+    const response = await axios.get(`${API_BASE_URL}/${SPORTS[sport]}/matches`, {
+      headers: {
+        'x-rapidapi-key': API_KEY,
+        'x-rapidapi-host': 'sport-highlights-api.p.rapidapi.com'
+      },
+      params: queryParams
+    });
+
+    const matches = response.data || [];
+    const cacheKey = `${sport}:${JSON.stringify(queryParams)}`;
+    
+    matchesCache.set(cacheKey, {
+      data: matches,
+      timestamp: Date.now()
+    });
+    
     return matches;
   } catch (error) {
-    console.error(`Error fetching ${sport} data:`, error.message);
-    
-    if (error.response?.status === 400 || error.response?.status === 500) {
-      return await fetchDataByDate(sport, params);
-    }
-    
-    if (cachedData) {
-      console.log(`Returning stale cache for ${sport}`);
-      return cachedData.data;
-    }
-    
+    console.error(`Error fetching ${sport} matches:`, error.message);
     throw error;
   }
 }
 
-// Fetch data by individual dates
-async function fetchDataByDate(sport, params = {}) {
-  const dates = getDateRange();
-  let allData = [];
+// Start/stop match updates
+function startMatchUpdates(sport) {
+  if (activeSubscriptions[sport].interval) return;
 
-  for (const date of dates) {
+  const updateMatches = async () => {
     try {
-      const response = await axios.get(`${API_BASE_URL}/${sport}/matches`, {
-        params: { ...params, date, limit: MAX_LIMIT },
-        headers: {
-          'x-rapidapi-key': API_KEY,
-          'x-rapidapi-host': new URL(API_BASE_URL).hostname
+      const matches = await fetchMatches(sport);
+      
+      // Update match details for subscribed matches
+      matches.forEach(match => {
+        if (activeMatchSubscriptions[sport][match.id]) {
+          fetchMatchDetails(sport, match.id).then(details => {
+            if (details) {
+              matchDetailsCache.set(match.id, {
+                data: details,
+                timestamp: Date.now()
+              });
+              io.to(`${sport}-${match.id}`).emit('match-update', {
+                sport,
+                matchId: match.id,
+                data: details,
+                lastUpdated: new Date().toISOString()
+              });
+            }
+          });
         }
       });
 
-      if (response.data) {
-        const data = Array.isArray(response.data) ? response.data : [response.data];
-        allData = [...allData, ...data];
-      }
+      io.to(sport).emit('matches-update', {
+        sport,
+        data: matches,
+        lastUpdated: new Date().toISOString()
+      });
+      activeSubscriptions[sport].lastUpdated = Date.now();
     } catch (error) {
-      console.error(`Error fetching ${sport} data for ${date}:`, error.message);
+      console.error(`Failed to update ${sport} matches:`, error.message);
     }
-  }
+  };
 
-  const cacheKey = buildCacheKey(sport, params);
-  sportDataCache.set(cacheKey, { data: allData, timestamp: Date.now() });
-  return allData;
+  updateMatches();
+  activeSubscriptions[sport].interval = setInterval(updateMatches, UPDATE_INTERVAL);
+  console.log(`Started ${sport} match updates`);
 }
 
-// Generic highlight handler
-async function handleHighlights(req, res, sport) {
-  try {
-    const { 
-      date, 
-      limit = 20, 
-      countryCode,
-      leagueId,
-      timezone = 'Etc/UTC',
-      offset = 0
-    } = req.query;
+// Cleanup functions
+function stopMatchUpdates(sport) {
+  if (activeSubscriptions[sport].interval) {
+    clearInterval(activeSubscriptions[sport].interval);
+    activeSubscriptions[sport].interval = null;
+    console.log(`Stopped ${sport} match updates`);
+  }
+}
 
-    const dates = getDateRange();
-    const params = {
-      limit: Math.min(limit, 40),
-      offset,
-      timezone
-    };
-
-    if (countryCode) params.countryCode = countryCode;
-    if (leagueId) params.leagueId = leagueId;
-
-    let allHighlights = [];
-    for (const currentDate of dates) {
-      try {
-        const response = await axios.get(`${API_BASE_URL}/${sport}/highlights`, {
-          params: { ...params, date: currentDate },
-          headers: {
-            'x-rapidapi-key': API_KEY,
-            'x-rapidapi-host': new URL(API_BASE_URL).hostname
-          }
-        });
-
-        if (response.data) {
-          const highlights = Array.isArray(response.data) ? response.data : [response.data];
-          allHighlights = [...allHighlights, ...highlights];
-        }
-      } catch (error) {
-        console.error(`Error fetching ${sport} highlights for date ${currentDate}:`, error.message);
-      }
+setInterval(() => {
+  const now = Date.now();
+  Object.keys(SPORTS).forEach(sport => {
+    if (activeSubscriptions[sport].users.size === 0 && 
+        activeSubscriptions[sport].interval && 
+        (now - activeSubscriptions[sport].lastUpdated) > 3600000) {
+      stopMatchUpdates(sport);
     }
-
-    res.json({
-      meta: {
-        lastUpdated: new Date().toISOString(),
-        parameters: params,
-        totalResults: allHighlights.length,
-        dateRange: {
-          startDate: dates[0],
-          endDate: dates[dates.length - 1],
-          days: dates.length
-        },
-        sport
-      },
-      data: allHighlights,
-      pagination: {
-        limit: params.limit,
-        offset: params.offset,
-        nextOffset: params.offset + params.limit
-      }
-    });
-  } catch (error) {
-    console.error(`${sport} Highlights API Error:`, error.message);
     
-    if (error.response) {
-      res.status(error.response.status).json({
-        error: `Failed to fetch ${sport} highlights`,
-        details: error.response.data,
-        status: error.response.status
-      });
-    } else {
-      res.status(500).json({ 
-        error: 'Internal server error',
-        details: error.message
-      });
-    }
-  }
-}
-
-// Generic highlight by ID handler
-async function handleHighlightById(req, res, sport) {
-  try {
-    const { id } = req.params;
-    
-    if (!id) {
-      return res.status(400).json({ error: 'Highlight ID is required' });
-    }
-
-    const response = await axios.get(`${API_BASE_URL}/${sport}/highlights/${id}`, {
-      headers: {
-        'x-rapidapi-key': API_KEY,
-        'x-rapidapi-host': new URL(API_BASE_URL).hostname
+    // Cleanup inactive match subscriptions
+    Object.keys(activeMatchSubscriptions[sport]).forEach(matchId => {
+      if (activeMatchSubscriptions[sport][matchId].size === 0) {
+        delete activeMatchSubscriptions[sport][matchId];
       }
     });
-
-    res.json({
-      meta: {
-        lastUpdated: new Date().toISOString(),
-        sport
-      },
-      data: response.data
-    });
-  } catch (error) {
-    console.error(`${sport} Highlight API Error:`, error.message);
-    res.status(500).json({ 
-      error: `Failed to fetch ${sport} highlight`,
-      details: error.response?.data || error.message
-    });
-  }
-}
+  });
+}, 60000);
 
 // Socket.io connection handling
 io.on('connection', (socket) => {
   console.log('New client connected:', socket.id);
 
-  socket.on('subscribe', ({ sport }) => {
-    if (!sport || !activeSubscriptions[sport]) {
+  // Subscribe to sport matches
+  socket.on('subscribe-matches', (sport) => {
+    if (!SPORTS[sport]) {
       return socket.emit('error', { message: 'Invalid sport specified' });
     }
 
@@ -298,200 +197,352 @@ io.on('connection', (socket) => {
     activeSubscriptions[sport].users.add(socket.id);
     
     if (activeSubscriptions[sport].users.size === 1) {
-      startSportUpdates(sport);
+      startMatchUpdates(sport);
     }
 
-    const cachedData = sportDataCache.get(buildCacheKey(sport));
-    if (cachedData) {
-      socket.emit(`${sport}-update`, {
-        meta: { lastUpdated: new Date(cachedData.timestamp).toISOString() },
-        data: cachedData.data
+    const cacheKey = `${sport}:{"limit":100}`;
+    if (matchesCache.has(cacheKey)) {
+      const cached = matchesCache.get(cacheKey);
+      socket.emit('matches-update', {
+        sport,
+        data: cached.data,
+        lastUpdated: new Date(cached.timestamp).toISOString()
       });
     }
 
-    console.log(`Client ${socket.id} subscribed to ${sport}`);
+    console.log(`Client ${socket.id} subscribed to ${sport} matches`);
   });
 
-  socket.on('unsubscribe', ({ sport }) => {
-    if (!sport || !activeSubscriptions[sport]) return;
-
-    socket.leave(sport);
-    activeSubscriptions[sport].users.delete(socket.id);
-    
-    if (activeSubscriptions[sport].users.size === 0) {
-      activeSubscriptions[sport].lastActive = Date.now();
+  // Subscribe to specific match
+  socket.on('subscribe-match', ({ sport, matchId }) => {
+    if (!SPORTS[sport]) {
+      return socket.emit('error', { message: 'Invalid sport specified' });
     }
 
-    console.log(`Client ${socket.id} unsubscribed from ${sport}`);
+    const roomName = `${sport}-${matchId}`;
+    socket.join(roomName);
+    
+    if (!activeMatchSubscriptions[sport][matchId]) {
+      activeMatchSubscriptions[sport][matchId] = new Set();
+    }
+    activeMatchSubscriptions[sport][matchId].add(socket.id);
+
+    if (matchDetailsCache.has(matchId)) {
+      const cached = matchDetailsCache.get(matchId);
+      socket.emit('match-update', {
+        sport,
+        matchId,
+        data: cached.data,
+        lastUpdated: new Date(cached.timestamp).toISOString()
+      });
+    } else {
+      fetchMatchDetails(sport, matchId).then(details => {
+        if (details) {
+          matchDetailsCache.set(matchId, {
+            data: details,
+            timestamp: Date.now()
+          });
+          socket.emit('match-update', {
+            sport,
+            matchId,
+            data: details,
+            lastUpdated: new Date().toISOString()
+          });
+        }
+      });
+    }
+
+    console.log(`Client ${socket.id} subscribed to ${sport} match ${matchId}`);
+  });
+
+  // Unsubscribe handlers
+  socket.on('unsubscribe-matches', (sport) => {
+    if (!SPORTS[sport]) return;
+    socket.leave(sport);
+    activeSubscriptions[sport].users.delete(socket.id);
+    if (activeSubscriptions[sport].users.size === 0) {
+      activeSubscriptions[sport].lastUpdated = Date.now();
+    }
+  });
+
+  socket.on('unsubscribe-match', ({ sport, matchId }) => {
+    if (!SPORTS[sport] || !activeMatchSubscriptions[sport][matchId]) return;
+    socket.leave(`${sport}-${matchId}`);
+    activeMatchSubscriptions[sport][matchId].delete(socket.id);
   });
 
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
-    
-    SPORTS.forEach(sport => {
+    Object.keys(SPORTS).forEach(sport => {
       if (activeSubscriptions[sport].users.has(socket.id)) {
         activeSubscriptions[sport].users.delete(socket.id);
         if (activeSubscriptions[sport].users.size === 0) {
-          activeSubscriptions[sport].lastActive = Date.now();
+          activeSubscriptions[sport].lastUpdated = Date.now();
         }
       }
+      
+      Object.keys(activeMatchSubscriptions[sport]).forEach(matchId => {
+        if (activeMatchSubscriptions[sport][matchId].has(socket.id)) {
+          activeMatchSubscriptions[sport][matchId].delete(socket.id);
+        }
+      });
     });
   });
 });
 
-// ======================== REST ENDPOINTS ========================
+// REST API Endpoints
+Object.keys(SPORTS).forEach(sport => {
+  // Matches endpoint
+  app.get(`/api/${sport}/matches`, async (req, res) => {
+    try {
+      const { leagueId, date, teamId, days = '7' } = req.query;
+      const params = {};
+      
+      if (date) params.date = date;
+      else if (leagueId) params.leagueId = leagueId;
+      else {
+        const endDate = new Date();
+        const startDate = new Date();
+        startDate.setDate(endDate.getDate() - parseInt(days));
+        params.dateFrom = startDate.toISOString().split('T')[0];
+        params.dateTo = endDate.toISOString().split('T')[0];
+      }
 
-// Generic sport matches endpoint
-app.get('/:sport/matches', async (req, res) => {
-  const { sport } = req.params;
-  
-  if (!activeSubscriptions[sport]) {
-    return res.status(400).json({ error: 'Invalid sport specified' });
-  }
+      if (teamId) params.teamId = teamId;
 
-  try {
-    const { 
-      date, leagueId, leagueName, season, 
-      countryCode, timezone, homeTeamId, awayTeamId 
-    } = req.query;
-    
-    const params = {};
-    if (date) params.date = date;
-    if (leagueId) params.leagueId = leagueId;
-    if (leagueName) params.leagueName = leagueName;
-    if (season) params.season = season;
-    if (countryCode) params.countryCode = countryCode;
-    if (timezone) params.timezone = timezone;
-    if (homeTeamId) params.homeTeamId = homeTeamId;
-    if (awayTeamId) params.awayTeamId = awayTeamId;
-
-    const data = await fetchSportData(sport, params);
-    
-    res.json({
-      meta: {
+      const data = await fetchMatches(sport, params);
+      res.json({
+        success: true,
+        data,
         lastUpdated: new Date().toISOString(),
-        totalResults: data.length,
-        sport,
-        parameters: params
-      },
-      data
-    });
-  } catch (error) {
-    console.error(`${sport} API Error:`, error.message);
-    res.status(500).json({ 
-      error: `Failed to fetch ${sport} data`,
-      details: error.response?.data || error.message
-    });
-  }
-});
-
-// Register highlights endpoints for all sports
-SPORTS.forEach(sport => {
-  app.get(`/${sport}/highlights`, (req, res) => handleHighlights(req, res, sport));
-  app.get(`/${sport}/highlights/:id`, (req, res) => handleHighlightById(req, res, sport));
-});
-
-// Football-specific endpoints
-app.get('/football/standings', async (req, res) => {
-  try {
-    const { leagueId, season } = req.query;
-
-    if (!leagueId || !season) {
-      return res.status(400).json({
-        error: 'Missing required parameters',
-        details: 'Both leagueId and season are required'
+        parametersUsed: params
+      });
+    } catch (error) {
+      console.error(`Error fetching ${sport} matches:`, error.message);
+      res.status(500).json({
+        success: false,
+        error: `Failed to fetch ${sport} matches`,
+        details: error.response?.data || error.message
       });
     }
+  });
 
-    const response = await axios.get(`${API_BASE_URL}/football/standings`, {
-      params: { leagueId, season },
-      headers: {
-        'x-rapidapi-key': API_KEY,
-        'x-rapidapi-host': new URL(API_BASE_URL).hostname
+  // Match details endpoint
+  app.get(`/api/${sport}/matches/:id`, async (req, res) => {
+    try {
+      const { id } = req.params;
+      let details = null;
+
+      if (matchDetailsCache.has(id)) {
+        details = matchDetailsCache.get(id).data;
+      } else {
+        details = await fetchMatchDetails(sport, id);
+        if (details) {
+          matchDetailsCache.set(id, {
+            data: details,
+            timestamp: Date.now()
+          });
+        }
       }
-    });
 
-    res.json({
-      meta: {
-        lastUpdated: new Date().toISOString(),
-        leagueId,
-        season
-      },
-      data: response.data
-    });
-  } catch (error) {
-    console.error('Standings API Error:', error.message);
-    res.status(500).json({ 
-      error: 'Failed to fetch standings',
-      details: error.response?.data || error.message
-    });
-  }
-});
-
-app.get('/football/h2h', async (req, res) => {
-  try {
-    const { team1, team2 } = req.query;
-    
-    if (!team1 || !team2) {
-      return res.status(400).json({ 
-        error: 'Both team1 and team2 parameters are required' 
+      if (details) {
+        res.json({
+          success: true,
+          data: details,
+          lastUpdated: new Date().toISOString()
+        });
+      } else {
+        res.status(404).json({
+          success: false,
+          error: 'Match details not found'
+        });
+      }
+    } catch (error) {
+      console.error(`Error fetching ${sport} match details:`, error.message);
+      res.status(500).json({
+        success: false,
+        error: `Failed to fetch ${sport} match details`,
+        details: error.response?.data || error.message
       });
     }
+  });
+  // Get highlights
+  app.get(`/api/${sport}/highlights`, async (req, res) => {
+    try {
+      const { 
+        countryName,
+        date,
+        matchId,
+        limit = 40
+      } = req.query;
 
-    const response = await axios.get(`${API_BASE_URL}/football/matches/head-to-head`, {
-      params: { h2h: `${team1}-${team2}` },
-      headers: {
-        'x-rapidapi-key': API_KEY,
-        'x-rapidapi-host': new URL(API_BASE_URL).hostname
+      // Validate at least one parameter exists
+      if (!countryName && !date && !matchId) {
+        return res.status(400).json({
+          success: false,
+          error: 'At least one parameter is required (countryName, date, or matchId)'
+        });
       }
-    });
 
-    res.json({
-      meta: {
+      const params = {
+        limit: Math.min(limit, 40),
+        timezone: 'Etc/UTC'
+      };
+
+      // Apply filters
+      if (countryName) params.countryName = countryName;
+      if (date) params.date = date;
+      if (matchId) params.matchId = matchId;
+
+      const response = await axios.get(`${API_BASE_URL}/${SPORTS[sport]}/highlights`, {
+        headers: {
+          'x-rapidapi-key': API_KEY,
+          'x-rapidapi-host': 'sport-highlights-api.p.rapidapi.com'
+        },
+        params
+      });
+
+      res.json({
+        success: true,
+        data: response.data,
         lastUpdated: new Date().toISOString(),
-        team1,
-        team2
-      },
-      data: response.data
-    });
-  } catch (error) {
-    console.error('H2H API Error:', error.message);
-    res.status(500).json({ 
-      error: 'Failed to fetch head-to-head data',
-      details: error.response?.data || error.message
-    });
-  }
+        parametersUsed: params
+      });
+    } catch (error) {
+      console.error(`Error fetching ${sport} highlights:`, error.message);
+      res.status(error.response?.status || 500).json({
+        success: false,
+        error: `Failed to fetch ${sport} highlights`,
+        details: error.response?.data || error.message
+      });
+    }
+  });
+  // Standings endpoint
+  app.get(`/api/${sport}/standings`, async (req, res) => {
+    try {
+      const { leagueId, season } = req.query;
+      if (!leagueId || !season) {
+        return res.status(400).json({
+          success: false,
+          error: 'Both leagueId and season are required'
+        });
+      }
+
+      const response = await axios.get(`${API_BASE_URL}/${SPORTS[sport]}/standings`, {
+        headers: {
+          'x-rapidapi-key': API_KEY,
+          'x-rapidapi-host': 'sport-highlights-api.p.rapidapi.com'
+        },
+        params: { leagueId, season }
+      });
+
+      res.json({
+        success: true,
+        data: response.data,
+        lastUpdated: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error(`Error fetching ${sport} standings:`, error.message);
+      res.status(500).json({
+        success: false,
+        error: `Failed to fetch ${sport} standings`,
+        details: error.response?.data || error.message
+      });
+    }
+  });
+
+  // Head-to-head endpoint
+  app.get(`/api/${sport}/h2h`, async (req, res) => {
+    try {
+      const { teamIdOne, teamIdTwo } = req.query;
+      if (!teamIdOne || !teamIdTwo) {
+        return res.status(400).json({
+          success: false,
+          error: 'Both teamIdOne and teamIdTwo are required'
+        });
+      }
+
+      const response = await axios.get(`${API_BASE_URL}/${SPORTS[sport]}/matches/head-to-head`, {
+        headers: {
+          'x-rapidapi-key': API_KEY,
+          'x-rapidapi-host': 'sport-highlights-api.p.rapidapi.com'
+        },
+        params: { teamIdOne, teamIdTwo }
+      });
+
+      res.json({
+        success: true,
+        data: response.data,
+        lastUpdated: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error(`Error fetching ${sport} H2H:`, error.message);
+      res.status(500).json({
+        success: false,
+        error: `Failed to fetch ${sport} head-to-head`,
+        details: error.response?.data || error.message
+      });
+    }
+  });
+
+  // Last 5 games endpoint
+  app.get(`/api/${sport}/last5`, async (req, res) => {
+    try {
+      const { teamId } = req.query;
+      if (!teamId) {
+        return res.status(400).json({
+          success: false,
+          error: 'teamId is required'
+        });
+      }
+
+      const response = await axios.get(`${API_BASE_URL}/${SPORTS[sport]}/matches/last5`, {
+        headers: {
+          'x-rapidapi-key': API_KEY,
+          'x-rapidapi-host': 'sport-highlights-api.p.rapidapi.com'
+        },
+        params: { teamId }
+      });
+
+      res.json({
+        success: true,
+        data: response.data,
+        lastUpdated: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error(`Error fetching ${sport} last 5 games:`, error.message);
+      res.status(500).json({
+        success: false,
+        error: `Failed to fetch ${sport} last 5 games`,
+        details: error.response?.data || error.message
+      });
+    }
+  });
 });
 
 // Root endpoint
 app.get('/', (req, res) => {
   res.send(`
-    <h1>Sports API Server</h1>
-    <p><strong>WebSocket URL:</strong> ws://${req.headers.host}</p>
-    <p><strong>Update Interval:</strong> ${UPDATE_INTERVAL/1000} seconds</p>
-    
-    <h2>Available Sports</h2>
+    <h1>Sports Live Score API</h1>
+    <h2>Supported Sports</h2>
     <ul>
-      ${SPORTS.map(sport => `
+      ${Object.keys(SPORTS).map(sport => `
         <li>
           <strong>${sport}</strong>
           <ul>
-            <li>GET /${sport}/matches - Get matches</li>
-            <li>GET /${sport}/highlights - Get highlights</li>
-            <li>GET /${sport}/highlights/:id - Get specific highlight</li>
-            ${sport === 'football' ? `
-              <li>GET /football/standings - Get league standings</li>
-              <li>GET /football/h2h - Head-to-head comparison</li>
-            ` : ''}
+            <li>WebSocket: subscribe-matches/${sport}</li>
+            <li>GET /api/${sport}/matches?date=YYYY-MM-DD (or leagueId=123)</li>
+            <li>GET /api/${sport}/matches/:id</li>
+            <li>GET /api/${sport}/highlights</li>
+            <li>GET /api/${sport}/standings?leagueId=123&season=2023</li>
+            <li>GET /api/${sport}/h2h?teamIdOne=123&teamIdTwo=456</li>
+            <li>GET /api/${sport}/last5?teamId=123</li>
           </ul>
         </li>
       `).join('')}
     </ul>
-    
-    <h2>WebSocket Instructions</h2>
-    <p>Send JSON message to subscribe: <code>{ "sport": "football" }</code></p>
-    <p>Send JSON message to unsubscribe: <code>{ "sport": "football", "action": "unsubscribe" }</code></p>
-    <p>You will receive updates every ${UPDATE_INTERVAL/1000} seconds</p>
+    <p><strong>WebSocket URL:</strong> ws://${req.headers.host}</p>
+    <p><strong>Real-time updates:</strong> Every ${UPDATE_INTERVAL/1000} seconds</p>
   `);
 });
 
@@ -499,6 +550,6 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`WebSocket endpoint: ws://localhost:${PORT}`);
-  console.log(`HTTP endpoint: http://localhost:${PORT}`);
+  console.log(`WebSocket: ws://localhost:${PORT}`);
+  console.log(`HTTP: http://localhost:${PORT}`);
 });

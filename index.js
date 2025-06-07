@@ -24,8 +24,8 @@ app.use(express.json());
 // API Configuration
 const API_BASE_URL = 'https://sport-highlights-api.p.rapidapi.com';
 const API_KEY = process.env.API_KEY || '9039004ce3msh8ae4f9c049e7c1fp13969fjsn90e3ab56524a';
-const UPDATE_INTERVAL = 1800000; // 30 minutes
-const CACHE_TTL = 300000; // 5 minutes cache
+const UPDATE_INTERVAL = 1800000; // 1 minute
+const CACHE_TTL = 60000; // 1 minute cache
 const MAX_LIMIT = 100; // Maximum matches per request
 const DAYS_RANGE = 7; // 7 days data
 const INACTIVITY_TIMEOUT = 300000; // 5 minutes inactivity
@@ -46,10 +46,9 @@ const activeSubscriptions = SPORTS.reduce((acc, sport) => {
 // Helper functions
 function getDateRange(days = DAYS_RANGE) {
   const startDate = moment().subtract(Math.floor(days/2), 'days');
-  return {
-    startDate: startDate.format('YYYY-MM-DD'),
-    endDate: startDate.clone().add(days, 'days').format('YYYY-MM-DD')
-  };
+  return Array.from({ length: days }, (_, i) => 
+    startDate.clone().add(i, 'days').format('YYYY-MM-DD')
+  );
 }
 
 function buildCacheKey(sport, params = {}) {
@@ -60,7 +59,7 @@ function buildCacheKey(sport, params = {}) {
   return `${sport}:${JSON.stringify(sortedParams)}`;
 }
 
-// Start/stop update intervals (same as before)
+// Start/stop update intervals
 function startSportUpdates(sport) {
   if (activeSubscriptions[sport].interval) return;
 
@@ -75,7 +74,10 @@ function startSportUpdates(sport) {
     activeSubscriptions[sport].lastActive = Date.now();
   };
 
+  // Initial fetch
   updateData();
+
+  // Set up interval
   activeSubscriptions[sport].interval = setInterval(updateData, UPDATE_INTERVAL);
   console.log(`Started ${sport} updates with ${UPDATE_INTERVAL/1000}s interval`);
 }
@@ -88,7 +90,7 @@ function stopSportUpdates(sport) {
   }
 }
 
-// Check for inactive sports (same as before)
+// Check for inactive sports every minute
 setInterval(() => {
   const now = Date.now();
   SPORTS.forEach(sport => {
@@ -100,7 +102,7 @@ setInterval(() => {
   });
 }, 60000);
 
-// Optimized fetch sport data
+// Fetch sport data with optimization
 async function fetchSportData(sport, params = {}) {
   const cacheKey = buildCacheKey(sport, params);
   const cachedData = sportDataCache.get(cacheKey);
@@ -110,24 +112,16 @@ async function fetchSportData(sport, params = {}) {
   }
 
   try {
-    // First try to fetch all data at once with date range
-    const dateRange = getDateRange();
     const response = await axios.get(`${API_BASE_URL}/${sport}/matches`, {
-      params: { 
-        ...params, 
-        limit: MAX_LIMIT,
-        dateFrom: dateRange.startDate,
-        dateTo: dateRange.endDate
-      },
+      params: { ...params, limit: MAX_LIMIT },
       headers: {
         'x-rapidapi-key': API_KEY,
         'x-rapidapi-host': new URL(API_BASE_URL).hostname
       }
     });
 
-    let matches = response.data?.data || [];
+    let matches = Array.isArray(response.data) ? response.data : [response.data];
     
-    // If we hit the limit, fall back to date-based fetching
     if (matches.length >= MAX_LIMIT) {
       console.log(`Hit max limit for ${sport}, using date-based fetching`);
       return await fetchDataByDate(sport, params);
@@ -138,7 +132,6 @@ async function fetchSportData(sport, params = {}) {
   } catch (error) {
     console.error(`Error fetching ${sport} data:`, error.message);
     
-    // If date range not supported, fall back to date-based fetching
     if (error.response?.status === 400 || error.response?.status === 500) {
       return await fetchDataByDate(sport, params);
     }
@@ -152,12 +145,12 @@ async function fetchSportData(sport, params = {}) {
   }
 }
 
-// Fetch data by individual dates (only as fallback)
+// Fetch data by individual dates
 async function fetchDataByDate(sport, params = {}) {
   const dates = getDateRange();
   let allData = [];
 
-  for (const date of [dates.startDate, dates.endDate]) { // Only fetch first and last day
+  for (const date of dates) {
     try {
       const response = await axios.get(`${API_BASE_URL}/${sport}/matches`, {
         params: { ...params, date, limit: MAX_LIMIT },
@@ -168,7 +161,7 @@ async function fetchDataByDate(sport, params = {}) {
       });
 
       if (response.data) {
-        const data = response.data?.data || [];
+        const data = Array.isArray(response.data) ? response.data : [response.data];
         allData = [...allData, ...data];
       }
     } catch (error) {
@@ -181,10 +174,11 @@ async function fetchDataByDate(sport, params = {}) {
   return allData;
 }
 
-// Optimized highlights handler
+// Generic highlight handler
 async function handleHighlights(req, res, sport) {
   try {
     const { 
+      date, 
       limit = 20, 
       countryCode,
       leagueId,
@@ -192,48 +186,55 @@ async function handleHighlights(req, res, sport) {
       offset = 0
     } = req.query;
 
-    const dateRange = getDateRange();
+    const dates = getDateRange();
     const params = {
       limit: Math.min(limit, 40),
       offset,
-      timezone,
-      dateFrom: dateRange.startDate,
-      dateTo: dateRange.endDate
+      timezone
     };
 
     if (countryCode) params.countryCode = countryCode;
     if (leagueId) params.leagueId = leagueId;
 
-    try {
-      const response = await axios.get(`${API_BASE_URL}/${sport}/highlights`, {
-        params,
-        headers: {
-          'x-rapidapi-key': API_KEY,
-          'x-rapidapi-host': new URL(API_BASE_URL).hostname
-        }
-      });
+    let allHighlights = [];
+    for (const currentDate of dates) {
+      try {
+        const response = await axios.get(`${API_BASE_URL}/${sport}/highlights`, {
+          params: { ...params, date: currentDate },
+          headers: {
+            'x-rapidapi-key': API_KEY,
+            'x-rapidapi-host': new URL(API_BASE_URL).hostname
+          }
+        });
 
-      const allHighlights = response.data?.data || [];
-
-      res.json({
-        meta: {
-          lastUpdated: new Date().toISOString(),
-          parameters: params,
-          totalResults: allHighlights.length,
-          dateRange,
-          sport
-        },
-        data: allHighlights,
-        pagination: {
-          limit: params.limit,
-          offset: params.offset,
-          nextOffset: params.offset + params.limit
+        if (response.data) {
+          const highlights = Array.isArray(response.data) ? response.data : [response.data];
+          allHighlights = [...allHighlights, ...highlights];
         }
-      });
-    } catch (error) {
-      console.error(`Error fetching ${sport} highlights:`, error.message);
-      throw error;
+      } catch (error) {
+        console.error(`Error fetching ${sport} highlights for date ${currentDate}:`, error.message);
+      }
     }
+
+    res.json({
+      meta: {
+        lastUpdated: new Date().toISOString(),
+        parameters: params,
+        totalResults: allHighlights.length,
+        dateRange: {
+          startDate: dates[0],
+          endDate: dates[dates.length - 1],
+          days: dates.length
+        },
+        sport
+      },
+      data: allHighlights,
+      pagination: {
+        limit: params.limit,
+        offset: params.offset,
+        nextOffset: params.offset + params.limit
+      }
+    });
   } catch (error) {
     console.error(`${sport} Highlights API Error:`, error.message);
     
@@ -252,10 +253,39 @@ async function handleHighlights(req, res, sport) {
   }
 }
 
-// Rest of your code remains the same (socket.io, endpoints, etc.)
-// ==============================================================
+// Generic highlight by ID handler
+async function handleHighlightById(req, res, sport) {
+  try {
+    const { id } = req.params;
+    
+    if (!id) {
+      return res.status(400).json({ error: 'Highlight ID is required' });
+    }
 
-// Socket.io connection handling (same as before)
+    const response = await axios.get(`${API_BASE_URL}/${sport}/highlights/${id}`, {
+      headers: {
+        'x-rapidapi-key': API_KEY,
+        'x-rapidapi-host': new URL(API_BASE_URL).hostname
+      }
+    });
+
+    res.json({
+      meta: {
+        lastUpdated: new Date().toISOString(),
+        sport
+      },
+      data: response.data
+    });
+  } catch (error) {
+    console.error(`${sport} Highlight API Error:`, error.message);
+    res.status(500).json({ 
+      error: `Failed to fetch ${sport} highlight`,
+      details: error.response?.data || error.message
+    });
+  }
+}
+
+// Socket.io connection handling
 io.on('connection', (socket) => {
   console.log('New client connected:', socket.id);
 
@@ -309,7 +339,9 @@ io.on('connection', (socket) => {
   });
 });
 
-// Generic sport matches endpoint (same as before)
+// ======================== REST ENDPOINTS ========================
+
+// Generic sport matches endpoint
 app.get('/:sport/matches', async (req, res) => {
   const { sport } = req.params;
   
@@ -353,13 +385,13 @@ app.get('/:sport/matches', async (req, res) => {
   }
 });
 
-// Register highlights endpoints for all sports (same as before)
+// Register highlights endpoints for all sports
 SPORTS.forEach(sport => {
   app.get(`/${sport}/highlights`, (req, res) => handleHighlights(req, res, sport));
   app.get(`/${sport}/highlights/:id`, (req, res) => handleHighlightById(req, res, sport));
 });
 
-// Football-specific endpoints (same as before)
+// Football-specific endpoints
 app.get('/football/standings', async (req, res) => {
   try {
     const { leagueId, season } = req.query;
@@ -431,7 +463,7 @@ app.get('/football/h2h', async (req, res) => {
   }
 });
 
-// Root endpoint (same as before)
+// Root endpoint
 app.get('/', (req, res) => {
   res.send(`
     <h1>Sports API Server</h1>

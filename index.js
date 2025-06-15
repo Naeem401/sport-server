@@ -20,7 +20,8 @@ app.use(express.json());
 
 // API Configuration
 const API_BASE_URL = 'https://sport-highlights-api.p.rapidapi.com';
-const API_KEY = process.env.API_KEY || 'e8555e69a8msh1de65d7c1cbf7d1p1bd3b7jsn2efec15ed0d5';
+
+const API_KEY = process.env.API_KEY || '23ed8f1637msh9d5ecb868166523p1db1adjsnab581199d3d5';
 const UPDATE_INTERVAL = 60000; // 1 minute updates
 const CACHE_TTL = 30000; // 30 seconds cache
 const INACTIVITY_TIMEOUT = 300000; // 5 minutes inactivity timeout
@@ -95,10 +96,10 @@ async function fetchMatchDetails(sport, matchId) {
   }
 }
 
-// Fetch matches with intelligent caching and error handling
+// Fetch matches with date and timezone parameters
 async function fetchMatches(sport, params = {}) {
-  const queryParams = { limit: 100, ...params };
-  const cacheKey = `${sport}:${JSON.stringify(queryParams)}`;
+  const { date, timezone = 'UTC', limit = 100 } = params;
+  const cacheKey = `${sport}:${date}:${timezone}:${limit}`;
 
   // Check cache first
   if (matchesCache.has(cacheKey)) {
@@ -109,21 +110,16 @@ async function fetchMatches(sport, params = {}) {
   }
 
   try {
-    // Default date range if no specific date or leagueId provided
-    if (!queryParams.date && !queryParams.leagueId) {
-      const endDate = new Date();
-      const startDate = new Date();
-      startDate.setDate(endDate.getDate() - 3);
-      queryParams.dateFrom = startDate.toISOString().split('T')[0];
-      queryParams.dateTo = endDate.toISOString().split('T')[0];
-    }
-
     const response = await axios.get(`${API_BASE_URL}/${SPORTS[sport]}/matches`, {
       headers: {
         'x-rapidapi-key': API_KEY,
         'x-rapidapi-host': 'sport-highlights-api.p.rapidapi.com'
       },
-      params: queryParams,
+      params: {
+        date,
+        timezone,
+        limit
+      },
       timeout: 5000
     });
 
@@ -162,7 +158,8 @@ function startMatchUpdates(sport) {
     if (activeSubscriptions[sport].isActive) {
       try {
         console.log(`Updating matches for ${sport}`);
-        const matches = await fetchMatches(sport);
+        const today = new Date().toISOString().split('T')[0];
+        const matches = await fetchMatches(sport, { date: today });
         
         // Update match details for subscribed matches
         const matchUpdatePromises = matches.map(async match => {
@@ -250,7 +247,8 @@ io.on('connection', (socket) => {
     }
 
     // Send cached data immediately if available
-    const cacheKey = `${sport}:{"limit":100}`;
+    const today = new Date().toISOString().split('T')[0];
+    const cacheKey = `${sport}:${today}:UTC:100`;
     if (matchesCache.has(cacheKey)) {
       const cached = matchesCache.get(cacheKey);
       socket.emit('matches-update', {
@@ -356,29 +354,24 @@ io.on('connection', (socket) => {
 
 // REST API Endpoints
 Object.keys(SPORTS).forEach(sport => {
-  // Matches endpoint
+  // Matches endpoint with date and timezone parameters
   app.get(`/api/${sport}/matches`, async (req, res) => {
     try {
-      const { leagueId, date, teamId, days = '3' } = req.query;
-      const params = {};
+      const { date, timezone = 'UTC', limit = 100 } = req.query;
       
-      if (date) {
-        params.date = date;
-      } else if (leagueId) {
-        params.leagueId = leagueId;
-      } else {
-        const endDate = new Date();
-        const startDate = new Date();
-        startDate.setDate(endDate.getDate() - parseInt(days));
-        params.dateFrom = startDate.toISOString().split('T')[0];
-        params.dateTo = endDate.toISOString().split('T')[0];
+      // Validate at least date is provided
+      if (!date) {
+        return res.status(400).json({
+          success: false,
+          error: 'Date parameter is required'
+        });
       }
 
-      if (teamId) params.teamId = teamId;
-
-      const data = await fetchMatches(sport, params);
+      const data = await fetchMatches(sport, { date, timezone, limit });
+      
       res.json({
         success: true,
+        sport,
         data,
         lastUpdated: new Date().toISOString()
       });
@@ -386,7 +379,9 @@ Object.keys(SPORTS).forEach(sport => {
       console.error(`Error fetching ${sport} matches:`, error.message);
       res.status(500).json({
         success: false,
-        error: `Failed to fetch ${sport} matches`
+        sport,
+        error: `Failed to fetch ${sport} matches`,
+        details: error.message
       });
     }
   });
@@ -400,12 +395,14 @@ Object.keys(SPORTS).forEach(sport => {
       if (details) {
         res.json({
           success: true,
+          sport,
           data: details,
           lastUpdated: new Date().toISOString()
         });
       } else {
         res.status(404).json({
           success: false,
+          sport,
           error: 'Match details not found'
         });
       }
@@ -413,6 +410,7 @@ Object.keys(SPORTS).forEach(sport => {
       console.error(`Error fetching ${sport} match details:`, error.message);
       res.status(500).json({
         success: false,
+        sport,
         error: `Failed to fetch ${sport} match details`
       });
     }
@@ -446,6 +444,7 @@ Object.keys(SPORTS).forEach(sport => {
 
       res.json({
         success: true,
+        sport,
         data: response.data,
         lastUpdated: new Date().toISOString()
       });
@@ -453,6 +452,7 @@ Object.keys(SPORTS).forEach(sport => {
       console.error(`Error fetching ${sport} highlights:`, error.message);
       res.status(500).json({
         success: false,
+        sport,
         error: `Failed to fetch ${sport} highlights`
       });
     }
@@ -481,6 +481,7 @@ Object.keys(SPORTS).forEach(sport => {
 
       res.json({
         success: true,
+        sport,
         data: response.data,
         lastUpdated: new Date().toISOString()
       });
@@ -488,6 +489,7 @@ Object.keys(SPORTS).forEach(sport => {
       console.error(`Error fetching ${sport} standings:`, error.message);
       res.status(500).json({
         success: false,
+        sport,
         error: `Failed to fetch ${sport} standings`
       });
     }
@@ -516,6 +518,7 @@ Object.keys(SPORTS).forEach(sport => {
 
       res.json({
         success: true,
+        sport,
         data: response.data,
         lastUpdated: new Date().toISOString()
       });
@@ -523,6 +526,7 @@ Object.keys(SPORTS).forEach(sport => {
       console.error(`Error fetching ${sport} H2H:`, error.message);
       res.status(500).json({
         success: false,
+        sport,
         error: `Failed to fetch ${sport} head-to-head`
       });
     }
@@ -551,6 +555,7 @@ Object.keys(SPORTS).forEach(sport => {
 
       res.json({
         success: true,
+        sport,
         data: response.data,
         lastUpdated: new Date().toISOString()
       });
@@ -558,6 +563,7 @@ Object.keys(SPORTS).forEach(sport => {
       console.error(`Error fetching ${sport} last 5 games:`, error.message);
       res.status(500).json({
         success: false,
+        sport,
         error: `Failed to fetch ${sport} last 5 games`
       });
     }
@@ -576,7 +582,7 @@ app.get('/', (req, res) => {
           <strong>${sport}</strong>
           <ul>
             <li>WebSocket: subscribe-matches/${sport}</li>
-            <li>GET /api/${sport}/matches</li>
+            <li>GET /api/${sport}/matches?date=YYYY-MM-DD&timezone=Timezone</li>
             <li>GET /api/${sport}/matches/:id</li>
             <li>GET /api/${sport}/highlights</li>
             <li>GET /api/${sport}/standings</li>

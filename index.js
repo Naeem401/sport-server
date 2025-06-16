@@ -7,11 +7,14 @@ const socketIo = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
+// In your Socket.io configuration:
 const io = socketIo(server, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"]
-  }
+  },
+  pingInterval: 25000,  // Send ping every 25s
+  pingTimeout: 5000    // Wait 5s for pong before considering dead
 });
 
 // Middleware
@@ -153,51 +156,60 @@ function startMatchUpdates(sport) {
     return;
   }
 
-  const updateMatches = async () => {
-    // Only proceed if sport is active
-    if (activeSubscriptions[sport].isActive) {
-      try {
-        console.log(`Updating matches for ${sport}`);
-        const today = new Date().toISOString().split('T')[0];
-        const matches = await fetchMatches(sport, { date: today });
-        
-        // Update match details for subscribed matches
-        const matchUpdatePromises = matches.map(async match => {
-          if (activeMatchSubscriptions[sport][match.id]) {
-            const details = await fetchMatchDetails(sport, match.id);
-            if (details) {
-              io.to(`${sport}-${match.id}`).emit('match-update', {
-                sport,
-                matchId: match.id,
-                data: details,
-                lastUpdated: new Date().toISOString()
-              });
-            }
-          }
-        });
+  // Modify the updateMatches function to be more precise about active subscriptions
+const updateMatches = async () => {
+  // Only proceed if there are active users
+  if (activeSubscriptions[sport].users.size > 0) {
+    try {
+      const today = new Date().toISOString().split('T')[0];
+      const matches = await fetchMatches(sport, { date: today });
+      
+      // Get list of actually subscribed matches
+      const subscribedMatches = Object.keys(activeMatchSubscriptions[sport]);
+      
+      // Only process matches that have subscribers
+      const relevantMatches = matches.filter(match => 
+        subscribedMatches.includes(match.id)
+      );
+      
+      // Update only subscribed matches
+      const matchUpdatePromises = relevantMatches.map(async match => {
+        const details = await fetchMatchDetails(sport, match.id);
+        if (details) {
+          io.to(`${sport}-${match.id}`).emit('match-update', {
+            sport,
+            matchId: match.id,
+            data: details,
+            lastUpdated: new Date().toISOString()
+          });
+        }
+      });
 
-        await Promise.all(matchUpdatePromises);
+      await Promise.all(matchUpdatePromises);
 
-        // Emit matches update
+      // Only send matches update if there are general match subscribers
+      if (activeSubscriptions[sport].users.size > 0) {
         io.to(sport).emit('matches-update', {
           sport,
           data: matches,
           lastUpdated: new Date().toISOString()
         });
-        
-        activeSubscriptions[sport].lastUpdated = Date.now();
-      } catch (error) {
-        console.error(`Failed to update ${sport} matches:`, error.message);
       }
-    } else {
-      // If sport is no longer active, clean up the interval
-      if (activeSubscriptions[sport].interval) {
-        clearInterval(activeSubscriptions[sport].interval);
-        activeSubscriptions[sport].interval = null;
-        console.log(`Stopped ${sport} updates due to inactivity`);
-      }
+      
+      activeSubscriptions[sport].lastUpdated = Date.now();
+    } catch (error) {
+      console.error(`Failed to update ${sport} matches:`, error.message);
     }
-  };
+  } else {
+    // Clean up if no users
+    if (activeSubscriptions[sport].interval) {
+      clearInterval(activeSubscriptions[sport].interval);
+      activeSubscriptions[sport].interval = null;
+      activeSubscriptions[sport].isActive = false;
+      console.log(`Stopped ${sport} updates - no active users`);
+    }
+  }
+};
 
   // Mark as active and start updates
   activeSubscriptions[sport].isActive = true;

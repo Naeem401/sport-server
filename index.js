@@ -24,7 +24,8 @@ app.use(express.json());
 // API Configuration
 const API_BASE_URL = 'https://sport-highlights-api.p.rapidapi.com';
 
-const API_KEY = process.env.API_KEY || '23ed8f1637msh9d5ecb868166523p1db1adjsnab581199d3d5';
+//const API_KEY = process.env.API_KEY || '23ed8f1637msh9d5ecb868166523p1db1adjsnab581199d3d5';
+const API_KEY = process.env.API_KEY || '9039004ce3msh8ae4f9c049e7c1fp13969fjsn90e3ab56524a';
 const UPDATE_INTERVAL = 60000; // 1 minute updates
 const CACHE_TTL = 30000; // 30 seconds cache
 const INACTIVITY_TIMEOUT = 300000; // 5 minutes inactivity timeout
@@ -100,7 +101,7 @@ async function fetchMatchDetails(sport, matchId) {
 }
 
 // Fetch matches with date and timezone parameters
-async function fetchMatches(sport, params = {}) {
+async function fetchMatches(sport, params = {}, retries = 3) {
   const { date, timezone = 'UTC', limit = 100 } = params;
   const cacheKey = `${sport}:${date}:${timezone}:${limit}`;
 
@@ -123,7 +124,7 @@ async function fetchMatches(sport, params = {}) {
         timezone,
         limit
       },
-      timeout: 5000
+      timeout: 10000 // Increased timeout
     });
 
     const data = response.data || [];
@@ -136,12 +137,18 @@ async function fetchMatches(sport, params = {}) {
     
     return data;
   } catch (error) {
-    console.error(`Error fetching ${sport} matches:`, error.message);
+    console.error(`Error fetching ${sport} matches (attempt ${4-retries}):`, error.message);
     
     // Return cached data if available
     if (matchesCache.has(cacheKey)) {
       console.log(`Returning cached data for ${sport} matches`);
       return matchesCache.get(cacheKey).data;
+    }
+    
+    // Retry if we have retries left
+    if (retries > 0) {
+      await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second before retry
+      return fetchMatches(sport, params, retries - 1);
     }
     
     throw error;

@@ -157,60 +157,29 @@ function startMatchUpdates(sport) {
   }
 
   // Modify the updateMatches function to be more precise about active subscriptions
-// updateMatches ফাংশন মডিফাই করুন
 const updateMatches = async () => {
+  // Only proceed if there are active users
   if (activeSubscriptions[sport].users.size > 0) {
     try {
       const today = new Date().toISOString().split('T')[0];
       const matches = await fetchMatches(sport, { date: today });
       
+      // Get list of actually subscribed matches
       const subscribedMatches = Object.keys(activeMatchSubscriptions[sport]);
       
+      // Only process matches that have subscribers
       const relevantMatches = matches.filter(match => 
         subscribedMatches.includes(match.id)
       );
       
+      // Update only subscribed matches
       const matchUpdatePromises = relevantMatches.map(async match => {
         const details = await fetchMatchDetails(sport, match.id);
         if (details) {
-          // স্পোর্ট অনুযায়ী মিনিমাল স্টেট ডেটা প্রস্তুত করুন
-          let minimalState = {};
-          
-          switch(sport) {
-            case 'football':
-              minimalState = {
-                clock: details.data.state.clock,
-                score: {
-                  current: details.data.state.score.current,
-                  penalties: details.data.state.score.penalties
-                },
-                description: details.data.state.description
-              };
-              break;
-              
-            case 'cricket':
-              minimalState = {
-                teams: {
-                  away: { score: details.data.state.teams.away.score },
-                  home: { 
-                    score: details.data.state.teams.home.score,
-                    info: details.data.state.teams.home.info
-                  }
-                },
-                report: details.data.state.report,
-                description: details.data.state.description
-              };
-              break;
-              
-            // অন্যান্য স্পোর্টের জন্য аналогично case যোগ করুন
-            default:
-              minimalState = details.data.state;
-          }
-          
-          io.to(`${sport}-${match.id}`).emit('match-state-update', {
+          io.to(`${sport}-${match.id}`).emit('match-update', {
+            sport,
             matchId: match.id,
-            sport: sport,
-            state: minimalState,
+            data: details,
             lastUpdated: new Date().toISOString()
           });
         }
@@ -218,6 +187,7 @@ const updateMatches = async () => {
 
       await Promise.all(matchUpdatePromises);
 
+      // Only send matches update if there are general match subscribers
       if (activeSubscriptions[sport].users.size > 0) {
         io.to(sport).emit('matches-update', {
           sport,
@@ -231,10 +201,12 @@ const updateMatches = async () => {
       console.error(`Failed to update ${sport} matches:`, error.message);
     }
   } else {
+    // Clean up if no users
     if (activeSubscriptions[sport].interval) {
       clearInterval(activeSubscriptions[sport].interval);
       activeSubscriptions[sport].interval = null;
       activeSubscriptions[sport].isActive = false;
+      console.log(`Stopped ${sport} updates - no active users`);
     }
   }
 };

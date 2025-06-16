@@ -26,7 +26,8 @@ const API_BASE_URL = 'https://sport-highlights-api.p.rapidapi.com';
 
 //const API_KEY = process.env.API_KEY || '23ed8f1637msh9d5ecb868166523p1db1adjsnab581199d3d5';
 // const API_KEY = process.env.API_KEY || '9039004ce3msh8ae4f9c049e7c1fp13969fjsn90e3ab56524a';
-const API_KEY = process.env.API_KEY || 'e8555e69a8msh1de65d7c1cbf7d1p1bd3b7jsn2efec15ed0d5';
+// const API_KEY = process.env.API_KEY || 'e8555e69a8msh1de65d7c1cbf7d1p1bd3b7jsn2efec15ed0d5';
+const API_KEY = process.env.API_KEY || '6e224e1bedmsh6457166cca6df05p13dfe9jsn9fba8754d067';
 const UPDATE_INTERVAL = 60000; // 1 minute updates
 const CACHE_TTL = 30000; // 30 seconds cache
 const INACTIVITY_TIMEOUT = 300000; // 5 minutes inactivity timeout

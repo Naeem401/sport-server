@@ -7,14 +7,13 @@ const socketIo = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
-// In your Socket.io configuration:
 const io = socketIo(server, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"]
   },
-  pingInterval: 25000,  // Send ping every 25s
-  pingTimeout: 5000    // Wait 5s for pong before considering dead
+  pingInterval: 25000,
+  pingTimeout: 5000
 });
 
 // Middleware
@@ -23,12 +22,9 @@ app.use(express.json());
 
 // API Configuration
 const API_BASE_URL = 'https://sport-highlights-api.p.rapidapi.com';
+const API_KEY = process.env.API_KEY || '9039004ce3msh8ae4f9c049e7c1fp13969fjsn90e3ab56524a';
 
-//const API_KEY = process.env.API_KEY || '23ed8f1637msh9d5ecb868166523p1db1adjsnab581199d3d5';
-// const API_KEY = process.env.API_KEY || '9039004ce3msh8ae4f9c049e7c1fp13969fjsn90e3ab56524a';
-// const API_KEY = process.env.API_KEY || 'e8555e69a8msh1de65d7c1cbf7d1p1bd3b7jsn2efec15ed0d5';
-const API_KEY = process.env.API_KEY || '6e224e1bedmsh6457166cca6df05p13dfe9jsn9fba8754d067';
-const UPDATE_INTERVAL = 60000; // 1 minute updates
+const UPDATE_INTERVAL = 60000; // 1 minute updates for active matches
 const CACHE_TTL = 30000; // 30 seconds cache
 const INACTIVITY_TIMEOUT = 300000; // 5 minutes inactivity timeout
 
@@ -50,7 +46,7 @@ const matchDetailsCache = new Map();
 const activeSubscriptions = {};
 const activeMatchSubscriptions = {};
 
-// Initialize subscriptions
+// Initialize subscriptions only for matches
 Object.keys(SPORTS).forEach(sport => {
   activeSubscriptions[sport] = {
     users: new Set(),
@@ -61,11 +57,10 @@ Object.keys(SPORTS).forEach(sport => {
   activeMatchSubscriptions[sport] = {};
 });
 
-// Fetch match details with error handling and caching
+// Fetch match details with caching
 async function fetchMatchDetails(sport, matchId) {
   const cacheKey = `${sport}-${matchId}`;
   
-  // Check cache first
   if (matchDetailsCache.has(cacheKey)) {
     const cached = matchDetailsCache.get(cacheKey);
     if (Date.now() - cached.timestamp < CACHE_TTL) {
@@ -92,7 +87,6 @@ async function fetchMatchDetails(sport, matchId) {
   } catch (error) {
     console.error(`Error fetching ${sport} match details:`, error.message);
     
-    // Return cached data if available, even if stale
     if (matchDetailsCache.has(cacheKey)) {
       console.log(`Returning cached data for ${sport} match ${matchId}`);
       return matchDetailsCache.get(cacheKey).data;
@@ -102,12 +96,11 @@ async function fetchMatchDetails(sport, matchId) {
   }
 }
 
-// Fetch matches with date and timezone parameters
+// Fetch matches with caching (only for active subscriptions)
 async function fetchMatches(sport, params = {}, retries = 3) {
   const { date, timezone = 'UTC', limit = 100 } = params;
   const cacheKey = `${sport}:${date}:${timezone}:${limit}`;
 
-  // Check cache first
   if (matchesCache.has(cacheKey)) {
     const cached = matchesCache.get(cacheKey);
     if (Date.now() - cached.timestamp < CACHE_TTL) {
@@ -126,12 +119,10 @@ async function fetchMatches(sport, params = {}, retries = 3) {
         timezone,
         limit
       },
-      timeout: 10000 // Increased timeout
+      timeout: 10000
     });
 
     const data = response.data || [];
-    
-    // Update cache
     matchesCache.set(cacheKey, {
       data: data,
       timestamp: Date.now()
@@ -141,15 +132,13 @@ async function fetchMatches(sport, params = {}, retries = 3) {
   } catch (error) {
     console.error(`Error fetching ${sport} matches (attempt ${4-retries}):`, error.message);
     
-    // Return cached data if available
     if (matchesCache.has(cacheKey)) {
       console.log(`Returning cached data for ${sport} matches`);
       return matchesCache.get(cacheKey).data;
     }
     
-    // Retry if we have retries left
     if (retries > 0) {
-      await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second before retry
+      await new Promise(resolve => setTimeout(resolve, 1000));
       return fetchMatches(sport, params, retries - 1);
     }
     
@@ -157,87 +146,75 @@ async function fetchMatches(sport, params = {}, retries = 3) {
   }
 }
 
-// Optimized match updates that only run for active sports
+// Optimized match updates for active subscriptions only
 function startMatchUpdates(sport) {
-  // If already running, just mark as active
   if (activeSubscriptions[sport].interval) {
     activeSubscriptions[sport].isActive = true;
     return;
   }
 
-  // Modify the updateMatches function to be more precise about active subscriptions
-const updateMatches = async () => {
-  // Only proceed if there are active users
-  if (activeSubscriptions[sport].users.size > 0) {
-    try {
-      const today = new Date().toISOString().split('T')[0];
-      const matches = await fetchMatches(sport, { date: today });
-      
-      // Get list of actually subscribed matches
-      const subscribedMatches = Object.keys(activeMatchSubscriptions[sport]);
-      
-      // Only process matches that have subscribers
-      const relevantMatches = matches.filter(match => 
-        subscribedMatches.includes(match.id)
-      );
-      
-      // Update only subscribed matches
-      const matchUpdatePromises = relevantMatches.map(async match => {
-        const details = await fetchMatchDetails(sport, match.id);
-        if (details) {
-          io.to(`${sport}-${match.id}`).emit('match-update', {
+  const updateMatches = async () => {
+    if (activeSubscriptions[sport].users.size > 0) {
+      try {
+        const today = new Date().toISOString().split('T')[0];
+        const matches = await fetchMatches(sport, { date: today });
+        
+        const subscribedMatches = Object.keys(activeMatchSubscriptions[sport]);
+        const relevantMatches = matches.filter(match => 
+          subscribedMatches.includes(match.id)
+        );
+        
+        const matchUpdatePromises = relevantMatches.map(async match => {
+          const details = await fetchMatchDetails(sport, match.id);
+          if (details) {
+            io.to(`${sport}-${match.id}`).emit('match-update', {
+              sport,
+              matchId: match.id,
+              data: details,
+              lastUpdated: new Date().toISOString()
+            });
+          }
+        });
+
+        await Promise.all(matchUpdatePromises);
+
+        if (activeSubscriptions[sport].users.size > 0) {
+          io.to(sport).emit('matches-update', {
             sport,
-            matchId: match.id,
-            data: details,
+            data: matches,
             lastUpdated: new Date().toISOString()
           });
         }
-      });
-
-      await Promise.all(matchUpdatePromises);
-
-      // Only send matches update if there are general match subscribers
-      if (activeSubscriptions[sport].users.size > 0) {
-        io.to(sport).emit('matches-update', {
-          sport,
-          data: matches,
-          lastUpdated: new Date().toISOString()
-        });
+        
+        activeSubscriptions[sport].lastUpdated = Date.now();
+      } catch (error) {
+        console.error(`Failed to update ${sport} matches:`, error.message);
       }
-      
-      activeSubscriptions[sport].lastUpdated = Date.now();
-    } catch (error) {
-      console.error(`Failed to update ${sport} matches:`, error.message);
+    } else {
+      if (activeSubscriptions[sport].interval) {
+        clearInterval(activeSubscriptions[sport].interval);
+        activeSubscriptions[sport].interval = null;
+        activeSubscriptions[sport].isActive = false;
+        console.log(`Stopped ${sport} updates - no active users`);
+      }
     }
-  } else {
-    // Clean up if no users
-    if (activeSubscriptions[sport].interval) {
-      clearInterval(activeSubscriptions[sport].interval);
-      activeSubscriptions[sport].interval = null;
-      activeSubscriptions[sport].isActive = false;
-      console.log(`Stopped ${sport} updates - no active users`);
-    }
-  }
-};
+  };
 
-  // Mark as active and start updates
   activeSubscriptions[sport].isActive = true;
-  updateMatches(); // Initial update
+  updateMatches();
   activeSubscriptions[sport].interval = setInterval(updateMatches, UPDATE_INTERVAL);
-  console.log(`Started ${sport} match updates`);
+  console.log(`Started ${sport} match updates (1 minute interval)`);
 }
 
-// Cleanup inactive sports and matches
+// Cleanup inactive subscriptions
 function cleanupInactiveSubscriptions() {
   const now = Date.now();
   Object.keys(SPORTS).forEach(sport => {
-    // Check for sport inactivity
     if (activeSubscriptions[sport].users.size === 0 && 
         (now - activeSubscriptions[sport].lastUpdated) > INACTIVITY_TIMEOUT) {
       activeSubscriptions[sport].isActive = false;
     }
     
-    // Cleanup inactive match subscriptions
     Object.keys(activeMatchSubscriptions[sport]).forEach(matchId => {
       if (activeMatchSubscriptions[sport][matchId].size === 0) {
         delete activeMatchSubscriptions[sport][matchId];
@@ -246,14 +223,13 @@ function cleanupInactiveSubscriptions() {
   });
 }
 
-// Run cleanup every minute
 setInterval(cleanupInactiveSubscriptions, 60000);
 
-// Socket.io connection handling
+// Socket.io for real-time matches only
 io.on('connection', (socket) => {
   console.log('New client connected:', socket.id);
 
-  // Subscribe to sport matches
+  // Subscribe to sport matches (real-time)
   socket.on('subscribe-matches', (sport) => {
     if (!SPORTS[sport]) {
       return socket.emit('error', { message: 'Invalid sport specified' });
@@ -262,12 +238,10 @@ io.on('connection', (socket) => {
     socket.join(sport);
     activeSubscriptions[sport].users.add(socket.id);
     
-    // Activate sport updates if not already active
     if (!activeSubscriptions[sport].isActive) {
       startMatchUpdates(sport);
     }
 
-    // Send cached data immediately if available
     const today = new Date().toISOString().split('T')[0];
     const cacheKey = `${sport}:${today}:UTC:100`;
     if (matchesCache.has(cacheKey)) {
@@ -279,10 +253,10 @@ io.on('connection', (socket) => {
       });
     }
 
-    console.log(`Client ${socket.id} subscribed to ${sport} matches`);
+    console.log(`Client ${socket.id} subscribed to real-time ${sport} matches`);
   });
 
-  // Subscribe to specific match
+  // Subscribe to specific match (real-time)
   socket.on('subscribe-match', ({ sport, matchId }) => {
     if (!SPORTS[sport]) {
       return socket.emit('error', { message: 'Invalid sport specified' });
@@ -291,13 +265,11 @@ io.on('connection', (socket) => {
     const roomName = `${sport}-${matchId}`;
     socket.join(roomName);
     
-    // Initialize match subscription if not exists
     if (!activeMatchSubscriptions[sport][matchId]) {
       activeMatchSubscriptions[sport][matchId] = new Set();
     }
     activeMatchSubscriptions[sport][matchId].add(socket.id);
 
-    // Send cached data immediately if available
     const cacheKey = `${sport}-${matchId}`;
     if (matchDetailsCache.has(cacheKey)) {
       const cached = matchDetailsCache.get(cacheKey);
@@ -308,7 +280,6 @@ io.on('connection', (socket) => {
         lastUpdated: new Date(cached.timestamp).toISOString()
       });
     } else {
-      // Fetch fresh data if not in cache
       fetchMatchDetails(sport, matchId).then(details => {
         if (details) {
           socket.emit('match-update', {
@@ -321,7 +292,7 @@ io.on('connection', (socket) => {
       });
     }
 
-    console.log(`Client ${socket.id} subscribed to ${sport} match ${matchId}`);
+    console.log(`Client ${socket.id} subscribed to real-time ${sport} match ${matchId}`);
   });
 
   // Unsubscribe from sport matches
@@ -331,7 +302,6 @@ io.on('connection', (socket) => {
     socket.leave(sport);
     activeSubscriptions[sport].users.delete(socket.id);
     
-    // Mark as inactive if no more users
     if (activeSubscriptions[sport].users.size === 0) {
       activeSubscriptions[sport].lastUpdated = Date.now();
       activeSubscriptions[sport].isActive = false;
@@ -350,20 +320,16 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
     
-    // Clean up all subscriptions for this socket
     Object.keys(SPORTS).forEach(sport => {
-      // Remove from sport subscriptions
       if (activeSubscriptions[sport].users.has(socket.id)) {
         activeSubscriptions[sport].users.delete(socket.id);
         
-        // Mark as inactive if no more users
         if (activeSubscriptions[sport].users.size === 0) {
           activeSubscriptions[sport].lastUpdated = Date.now();
           activeSubscriptions[sport].isActive = false;
         }
       }
       
-      // Remove from match subscriptions
       Object.keys(activeMatchSubscriptions[sport]).forEach(matchId => {
         if (activeMatchSubscriptions[sport][matchId].has(socket.id)) {
           activeMatchSubscriptions[sport][matchId].delete(socket.id);
@@ -373,14 +339,13 @@ io.on('connection', (socket) => {
   });
 });
 
-// REST API Endpoints
+// REST API Endpoints (non-real-time)
 Object.keys(SPORTS).forEach(sport => {
-  // Matches endpoint with date and timezone parameters
+  // Matches endpoint (can be called directly or via socket)
   app.get(`/api/${sport}/matches`, async (req, res) => {
     try {
       const { date, timezone = 'UTC', limit = 100 } = req.query;
       
-      // Validate at least date is provided
       if (!date) {
         return res.status(400).json({
           success: false,
@@ -407,7 +372,7 @@ Object.keys(SPORTS).forEach(sport => {
     }
   });
 
-  // Match details endpoint
+  // Match details endpoint (can be called directly or via socket)
   app.get(`/api/${sport}/matches/:id`, async (req, res) => {
     try {
       const { id } = req.params;
@@ -437,7 +402,7 @@ Object.keys(SPORTS).forEach(sport => {
     }
   });
 
-  // Highlights endpoint
+  // Other endpoints (normal API calls, no real-time)
   app.get(`/api/${sport}/highlights`, async (req, res) => {
     try {
       const { countryName, date, matchId, limit = 20 } = req.query;
@@ -450,7 +415,7 @@ Object.keys(SPORTS).forEach(sport => {
       if (!countryName && !date && !matchId) {
         return res.status(400).json({
           success: false,
-          error: 'At least one parameter is required (countryName, date, or matchId)'
+          error: 'At least one parameter is required'
         });
       }
 
@@ -466,8 +431,7 @@ Object.keys(SPORTS).forEach(sport => {
       res.json({
         success: true,
         sport,
-        data: response.data,
-        lastUpdated: new Date().toISOString()
+        data: response.data
       });
     } catch (error) {
       console.error(`Error fetching ${sport} highlights:`, error.message);
@@ -479,7 +443,6 @@ Object.keys(SPORTS).forEach(sport => {
     }
   });
 
-  // Standings endpoint
   app.get(`/api/${sport}/standings`, async (req, res) => {
     try {
       const { leagueId, season } = req.query;
@@ -503,8 +466,7 @@ Object.keys(SPORTS).forEach(sport => {
       res.json({
         success: true,
         sport,
-        data: response.data,
-        lastUpdated: new Date().toISOString()
+        data: response.data
       });
     } catch (error) {
       console.error(`Error fetching ${sport} standings:`, error.message);
@@ -516,7 +478,6 @@ Object.keys(SPORTS).forEach(sport => {
     }
   });
 
-  // Head-to-head endpoint
   app.get(`/api/${sport}/h2h`, async (req, res) => {
     try {
       const { teamIdOne, teamIdTwo } = req.query;
@@ -540,8 +501,7 @@ Object.keys(SPORTS).forEach(sport => {
       res.json({
         success: true,
         sport,
-        data: response.data,
-        lastUpdated: new Date().toISOString()
+        data: response.data
       });
     } catch (error) {
       console.error(`Error fetching ${sport} H2H:`, error.message);
@@ -553,7 +513,6 @@ Object.keys(SPORTS).forEach(sport => {
     }
   });
 
-  // Last 5 games endpoint
   app.get(`/api/${sport}/last5`, async (req, res) => {
     try {
       const { teamId } = req.query;
@@ -577,8 +536,7 @@ Object.keys(SPORTS).forEach(sport => {
       res.json({
         success: true,
         sport,
-        data: response.data,
-        lastUpdated: new Date().toISOString()
+        data: response.data
       });
     } catch (error) {
       console.error(`Error fetching ${sport} last 5 games:`, error.message);
@@ -595,20 +553,20 @@ Object.keys(SPORTS).forEach(sport => {
 app.get('/', (req, res) => {
   res.send(`
     <h1>Sports Live Score API</h1>
-    <p>Real-time updates every ${UPDATE_INTERVAL/1000} seconds</p>
+    <p>Real-time matches updates every ${UPDATE_INTERVAL/1000} seconds for active subscriptions</p>
     <h2>Supported Sports</h2>
     <ul>
       ${Object.keys(SPORTS).map(sport => `
         <li>
           <strong>${sport}</strong>
           <ul>
-            <li>WebSocket: subscribe-matches/${sport}</li>
+            <li>WebSocket: subscribe-matches/${sport} (real-time)</li>
             <li>GET /api/${sport}/matches?date=YYYY-MM-DD&timezone=Timezone</li>
             <li>GET /api/${sport}/matches/:id</li>
-            <li>GET /api/${sport}/highlights</li>
-            <li>GET /api/${sport}/standings</li>
-            <li>GET /api/${sport}/h2h</li>
-            <li>GET /api/${sport}/last5</li>
+            <li>GET /api/${sport}/highlights (normal API)</li>
+            <li>GET /api/${sport}/standings (normal API)</li>
+            <li>GET /api/${sport}/h2h (normal API)</li>
+            <li>GET /api/${sport}/last5 (normal API)</li>
           </ul>
         </li>
       `).join('')}
@@ -620,6 +578,6 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`WebSocket: ws://localhost:${PORT}`);
+  console.log(`WebSocket: ws://localhost:${PORT} (for real-time matches only)`);
   console.log(`HTTP: http://localhost:${PORT}`);
 });

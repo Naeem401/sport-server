@@ -360,7 +360,7 @@ app.get('/api/stats', (req, res) => {
 
 // REST API Endpoints
 Object.keys(SPORTS).forEach(sport => {
- app.get(`/api/${sport}/matches`, async (req, res) => {
+  app.get(`/api/${sport}/matches`, async (req, res) => {
     try {
       const { date, timezone = 'UTC', limit = 100 } = req.query;
       
@@ -596,7 +596,56 @@ app.get('/', (req, res) => {
     </ul>
   `);
 });
+app.get('/football/matches', async (req, res) => {
+  try {
+    const { date, timezone = 'UTC', limit = 10 } = req.query;
+    
+    if (!date) {
+      return res.status(400).json({
+        success: false,
+        error: 'Date parameter is required (YYYY-MM-DD format)'
+      });
+    }
 
+    const response = await axios.get(`${API_BASE_URL}/football/matches`, {
+      headers: {
+        'x-rapidapi-key': API_KEY,
+        'x-rapidapi-host': 'sport-highlights-api.p.rapidapi.com'
+      },
+      params: {
+        date,
+        timezone,
+        limit
+      },
+      timeout: 5000
+    });
+
+    // Simplify the response format
+    let matches = [];
+    if (Array.isArray(response.data)) {
+      matches = response.data;
+    } else if (response.data && Array.isArray(response.data.data)) {
+      matches = response.data.data;
+    } else if (response.data && Array.isArray(response.data.matches)) {
+      matches = response.data.matches;
+    }
+
+    res.json({
+      success: true,
+      count: matches.length,
+      date,
+      matches
+    });
+
+  } catch (error) {
+    console.error('Football matches API error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch football matches',
+      details: error.message
+    });
+  }
+});
 // Start server
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
@@ -604,5 +653,3 @@ server.listen(PORT, () => {
   console.log(`WebSocket: ws://localhost:${PORT}`);
   console.log(`HTTP: http://localhost:${PORT}`);
 });
-
-
